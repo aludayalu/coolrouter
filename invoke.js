@@ -1,5 +1,4 @@
-import * as anchor from "@coral-xyz/anchor";
-import { AnchorProvider, Wallet, BorshCoder } from "@coral-xyz/anchor";
+import { BorshCoder } from "@coral-xyz/anchor";
 import { 
   Connection, 
   PublicKey, 
@@ -15,9 +14,8 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Configuration
-const COOLROUTER_PROGRAM_ID = "CATsZNcHms98EcQo1qzGcA3XLPf47NLhQC5g2cRe19Gu"; // New address
-const TESTER_PROGRAM_ID = "BrRX5CdLjXZDPzaQFY1BnjdsLeqMED1JeKKSjpnaxU1R"; // New address
+const COOLROUTER_PROGRAM_ID = "CATsZNcHms98EcQo1qzGcA3XLPf47NLhQC5g2cRe19Gu";
+const TESTER_PROGRAM_ID = "BrRX5CdLjXZDPzaQFY1BnjdsLeqMED1JeKKSjpnaxU1R";
 const RPC_ENDPOINT = process.env.RPC_ENDPOINT || "http://localhost:8899";
 const TESTER_IDL_PATH = path.join(__dirname, "coolrouter/target/idl/llm_consumer.json");
 const KEYPAIR_PATH = process.env.KEYPAIR_PATH || path.join(process.env.HOME, ".config/solana/id.json");
@@ -43,6 +41,8 @@ async function main() {
 
   const requestId = `req_${Date.now()}_${Math.random().toString(36).substring(7)}`;
   const prompt = "What is the meaning of life?";
+  const minVotes = 1;
+  const approvalThreshold = 66;
 
   const testerProgramId = new PublicKey(TESTER_PROGRAM_ID);
   const coolrouterProgramId = new PublicKey(COOLROUTER_PROGRAM_ID);
@@ -69,6 +69,8 @@ async function main() {
     requestIdBuffer,
     Buffer.from(new Uint8Array(new Uint32Array([promptBuffer.length]).buffer)),
     promptBuffer,
+    Buffer.from([minVotes]),
+    Buffer.from([approvalThreshold]),
   ]);
 
   const keys = [
@@ -97,6 +99,7 @@ async function main() {
 
   await connection.confirmTransaction(signature, "confirmed");
   console.log(`Request created: ${requestId}`);
+  console.log(`Min votes: ${minVotes}, Approval threshold: ${approvalThreshold}%`);
   console.log(`Signature: ${signature}`);
 }
 

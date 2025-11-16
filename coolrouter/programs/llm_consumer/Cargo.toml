@@ -24,7 +24,7 @@ custom-panic = []
 anchor-lang = "0.32.1"
 solana-program = "1.18"
 sha2 = "0.10"
-coolrouter-cpi = "0.1.4"
+coolrouter-cpi = "0.1.5"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

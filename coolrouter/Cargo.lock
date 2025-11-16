@@ -690,7 +690,7 @@ dependencies = [
 
 [[package]]
 name = "coolrouter-cpi"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anchor-lang",
  "sha2 0.10.9",
@@ -698,9 +698,9 @@ dependencies = [
 
 [[package]]
 name = "coolrouter-cpi"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4693c7c1eb1e0ca6f797fd8b4527664a345b674dca34f546fc34ce5b8a5b0d2c"
+checksum = "c90e483f671f76036118d440ac8017bb37135a156ea3b21d6d5ecb8fb3d47301"
 dependencies = [
  "anchor-lang",
  "sha2 0.10.9",
@@ -1143,7 +1143,7 @@ name = "llm_consumer"
 version = "0.1.0"
 dependencies = [
  "anchor-lang",
- "coolrouter-cpi 0.1.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "coolrouter-cpi 0.1.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "sha2 0.10.9",
  "solana-program",
 ]

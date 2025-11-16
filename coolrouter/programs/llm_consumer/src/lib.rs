@@ -1,58 +1,55 @@
 use anchor_lang::prelude::*;
 use coolrouter_cpi::{create_llm_request, Message};
 
-// Replace with actual program ID after deployment
 declare_id!("BrRX5CdLjXZDPzaQFY1BnjdsLeqMED1JeKKSjpnaxU1R");
 
-// Constants for space allocation
-const MAX_REQUEST_ID_LEN: usize = 60;  // Max 60 bytes for request_id (not Unicode chars)
-const MAX_RESPONSE_LEN: usize = 2000;  // Max 2000 bytes for response
+const MAX_REQUEST_ID_LEN: usize = 60;
+const MAX_RESPONSE_LEN: usize = 2000;
 
-// Calculate account space from constants to keep them in sync
-const ACCOUNT_SPACE: usize = 8                          // discriminator
-    + (4 + MAX_REQUEST_ID_LEN)                          // request_id (String: 4-byte length + data)
-    + (4 + MAX_RESPONSE_LEN)                            // response (Vec<u8>: 4-byte length + data)
-    + 1                                                  // has_response (bool)
-    + 32;                                                // authority (Pubkey)
+const ACCOUNT_SPACE: usize = 8
+    + (4 + MAX_REQUEST_ID_LEN)
+    + (4 + MAX_RESPONSE_LEN)
+    + 1
+    + 32;
 
 #[program]
 pub mod llm_consumer {
     use super::*;
 
-    /// Initialize a new LLM query
     pub fn request_llm_response(
         ctx: Context<RequestLLMResponse>,
         request_id: String,
         prompt: String,
+        min_votes: u8,
+        approval_threshold: u8,
     ) -> Result<()> {
         let consumer_state = &mut ctx.accounts.consumer_state;
         
-        // Validate request_id length to match our space allocation
-        // Note: .len() returns bytes, not Unicode character count
-        // For typical ASCII/UUID request IDs, this is what we want
         require!(
             request_id.len() <= MAX_REQUEST_ID_LEN,
             ErrorCode::RequestIdTooLong
         );
         
-        // Store request info
+        require!(min_votes > 0, ErrorCode::InvalidMinVotes);
+        require!(
+            approval_threshold > 0 && approval_threshold <= 100,
+            ErrorCode::InvalidApprovalThreshold
+        );
+        
         consumer_state.request_id = request_id.clone();
         consumer_state.response = Vec::new();
         consumer_state.has_response = false;
         consumer_state.authority = ctx.accounts.authority.key();
         
-        // Prepare the message for the LLM
         let messages = vec![Message {
             role: "user".to_string(),
             content: prompt,
         }];
         
-        // Create accounts vec for callback
         let callback_accounts = vec![
             ctx.accounts.consumer_state.to_account_info(),
         ];
         
-        // Use the CoolRouter CPI package
         create_llm_request(
             ctx.accounts.request_pda.to_account_info(),
             ctx.accounts.authority.to_account_info(),
@@ -64,6 +61,8 @@ pub mod llm_consumer {
             "openai".to_string(),
             "gpt-4".to_string(),
             messages,
+            min_votes,
+            approval_threshold,
         )?;
         
         msg!("LLM request created with ID: {}", request_id);
@@ -71,7 +70,6 @@ pub mod llm_consumer {
         Ok(())
     }
 
-    /// Callback function that CoolRouter will call when the response is ready
     pub fn llm_callback(
         ctx: Context<LLMCallback>,
         request_id: String,
@@ -84,17 +82,14 @@ pub mod llm_consumer {
             ErrorCode::RequestIdMismatch
         );
         
-        // Validate response length
         require!(
             response.len() <= MAX_RESPONSE_LEN,
             ErrorCode::ResponseTooLarge
         );
         
-        // Store the response
         consumer_state.response = response.clone();
         consumer_state.has_response = true;
         
-        // Try to convert to string for preview (if it's valid UTF-8)
         let response_preview = String::from_utf8(response.clone())
             .unwrap_or_else(|_| format!("[Binary data: {} bytes]", response.len()))
             .chars()
@@ -111,11 +106,9 @@ pub mod llm_consumer {
         Ok(())
     }
 
-    /// Query the stored response
     pub fn get_response(ctx: Context<GetResponse>) -> Result<Vec<u8>> {
         let consumer_state = &ctx.accounts.consumer_state;
         
-        // Verify the caller is the original authority who created the request
         require_keys_eq!(
             consumer_state.authority,
             ctx.accounts.authority.key(),
@@ -134,7 +127,6 @@ pub struct RequestLLMResponse<'info> {
     #[account(
         init,
         payer = authority,
-        // Use constant to ensure space calculation matches our limits
         space = ACCOUNT_SPACE,
         seeds = [b"consumer_state", authority.key().as_ref(), request_id.as_bytes()],
         bump
@@ -171,8 +163,8 @@ pub struct GetResponse<'info> {
 
 #[account]
 pub struct ConsumerState {
-    pub request_id: String,       // Max 60 bytes (not Unicode chars)
-    pub response: Vec<u8>,        // Max 2000 bytes
+    pub request_id: String,
+    pub response: Vec<u8>,
     pub has_response: bool,
     pub authority: Pubkey,
 }
@@ -195,4 +187,8 @@ pub enum ErrorCode {
     ResponseTooLarge,
     #[msg("Unauthorized: caller is not the request authority")]
     Unauthorized,
+    #[msg("Minimum votes must be greater than 0")]
+    InvalidMinVotes,
+    #[msg("Approval threshold must be between 1 and 100")]
+    InvalidApprovalThreshold,
 }

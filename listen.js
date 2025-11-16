@@ -1,4 +1,6 @@
-import { Connection, PublicKey } from "@solana/web3.js";
+import { BorshCoder } from "@coral-xyz/anchor";
+import { Connection, PublicKey, Keypair, Transaction, TransactionInstruction } from "@solana/web3.js";
+import { createHash } from "crypto";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -6,6 +8,7 @@ import { fileURLToPath } from "url";
 const COOLROUTER_PROGRAM_ID = "CATsZNcHms98EcQo1qzGcA3XLPf47NLhQC5g2cRe19Gu";
 const LLM_CONSUMER_PROGRAM_ID = "BrRX5CdLjXZDPzaQFY1BnjdsLeqMED1JeKKSjpnaxU1R";
 const RPC_ENDPOINT = process.env.RPC_ENDPOINT || "http://localhost:8899";
+const KEYPAIR_PATH = process.env.KEYPAIR_PATH || path.join(process.env.HOME, ".config/solana/id.json");
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -18,10 +21,23 @@ class BorshBufferParser {
     this.offset = 0;
   }
 
+  readU8() {
+    const value = this.buffer.readUInt8(this.offset);
+    this.offset += 1;
+    return value;
+  }
+
   readU32() {
     const value = this.buffer.readUInt32LE(this.offset);
     this.offset += 4;
     return value;
+  }
+
+  readU64() {
+    const low = this.buffer.readUInt32LE(this.offset);
+    const high = this.buffer.readUInt32LE(this.offset + 4);
+    this.offset += 8;
+    return low + high * 0x100000000;
   }
 
   readString() {
@@ -38,6 +54,12 @@ class BorshBufferParser {
     return new PublicKey(pubkeyBuffer);
   }
 
+  readBytes(length) {
+    const bytes = this.buffer.subarray(this.offset, this.offset + length);
+    this.offset += length;
+    return bytes;
+  }
+
   readStruct(fields) {
     const struct = {};
     for (const field of fields) {
@@ -45,6 +67,10 @@ class BorshBufferParser {
         struct[field.name] = this.readString();
       } else if (field.type === "pubkey") {
         struct[field.name] = this.readPubkey();
+      } else if (field.type === "u8") {
+        struct[field.name] = this.readU8();
+      } else if (field.type.array && field.type.array[0] === "u8" && field.type.array[1] === 32) {
+        struct[field.name] = this.readBytes(32);
       }
     }
     return struct;
@@ -78,143 +104,396 @@ function modify_idl(idl_object) {
   return idl_object;
 }
 
-async function main() {
-  const coolrouterIdl = modify_idl(JSON.parse(fs.readFileSync(COOLROUTER_IDL_PATH, "utf8")));
-  const consumerIdl = modify_idl(JSON.parse(fs.readFileSync(CONSUMER_IDL_PATH, "utf8")));
-  
-  const requestCreatedInfo = coolrouterIdl.events.find(e => e.name === "RequestCreated");
-  const requestCreatedDiscriminator = Buffer.from(requestCreatedInfo.discriminator);
-
-  const requestCreatedType = coolrouterIdl.types.find(t => t.name === "RequestCreated");
-  const requestCreatedFields = requestCreatedType.type.fields;
-
-  const messageType = coolrouterIdl.types.find(t => t.name === "Message");
-  const messageFields = messageType.type.fields;
-
-  const responseReceivedInfo = consumerIdl.events.find(e => e.name === "ResponseReceived");
-  const responseReceivedDiscriminator = Buffer.from(responseReceivedInfo.discriminator);
-
-  const responseReceivedType = consumerIdl.types.find(t => t.name === "ResponseReceived");
-  const responseReceivedFields = responseReceivedType.type.fields;
-
-  const connection = new Connection(RPC_ENDPOINT, "confirmed");
-  const coolrouterProgramId = new PublicKey(COOLROUTER_PROGRAM_ID);
-  const consumerProgramId = new PublicKey(LLM_CONSUMER_PROGRAM_ID);
-
-  connection.onLogs(
-    coolrouterProgramId,
-    (logs, ctx) => {
-      handleCoolrouterLogs(logs, ctx.slot, {
-        requestCreated: { discriminator: requestCreatedDiscriminator, fields: requestCreatedFields },
-        messageFields
-      });
-    },
-    "confirmed"
-  );
-
-  connection.onLogs(
-    consumerProgramId,
-    (logs, ctx) => {
-      handleConsumerLogs(logs, ctx.slot, {
-        responseReceived: { discriminator: responseReceivedDiscriminator, fields: responseReceivedFields }
-      });
-    },
-    "confirmed"
-  );
-
-  console.log("Listening for events...");
-
-  process.on("SIGINT", () => {
-    process.exit(0);
-  });
+function loadKeypair(filepath) {
+  const keypairData = JSON.parse(fs.readFileSync(filepath, "utf8"));
+  return Keypair.fromSecretKey(Uint8Array.from(keypairData));
 }
 
-function handleCoolrouterLogs(logs, slot, eventData) {
-  if (logs.err) return;
+function computeResponseHash(responseText) {
+  const responseBuffer = Buffer.from(responseText);
+  return createHash("sha256").update(responseBuffer).digest();
+}
 
-  for (const log of logs.logs) {
-    if (!log.startsWith("Program data: ")) continue;
+class OracleNode {
+  constructor() {
+    this.coolrouterIdl = modify_idl(JSON.parse(fs.readFileSync(COOLROUTER_IDL_PATH, "utf8")));
+    this.consumerIdl = modify_idl(JSON.parse(fs.readFileSync(CONSUMER_IDL_PATH, "utf8")));
+    this.oracleKeypair = loadKeypair(KEYPAIR_PATH);
+    this.connection = new Connection(RPC_ENDPOINT, "confirmed");
+    this.coolrouterCoder = new BorshCoder(this.coolrouterIdl);
+    this.pendingRequests = new Map();
 
-    const eventDataB64 = log.substring(14);
-    const eventDataBuffer = Buffer.from(eventDataB64, "base64");
-    if (eventDataBuffer.length < 8) continue;
+    this.eventDiscriminators = {
+      requestCreated: Buffer.from(this.coolrouterIdl.events.find(e => e.name === "RequestCreated").discriminator),
+      votingCompleted: Buffer.from(this.coolrouterIdl.events.find(e => e.name === "VotingCompleted").discriminator),
+      requestFulfilled: Buffer.from(this.coolrouterIdl.events.find(e => e.name === "RequestFulfilled").discriminator),
+      responseReceived: Buffer.from(this.consumerIdl.events.find(e => e.name === "ResponseReceived").discriminator),
+    };
 
-    const eventDiscriminator = eventDataBuffer.subarray(0, 8);
+    this.eventFields = {
+      requestCreated: this.coolrouterIdl.types.find(t => t.name === "RequestCreated").type.fields,
+      votingCompleted: this.coolrouterIdl.types.find(t => t.name === "VotingCompleted").type.fields,
+      requestFulfilled: this.coolrouterIdl.types.find(t => t.name === "RequestFulfilled").type.fields,
+      responseReceived: this.consumerIdl.types.find(t => t.name === "ResponseReceived").type.fields,
+      message: this.coolrouterIdl.types.find(t => t.name === "Message").type.fields,
+    };
+  }
 
-    if (eventDiscriminator.equals(eventData.requestCreated.discriminator)) {
-      try {
-        const payload = eventDataBuffer.subarray(8);
-        const parser = new BorshBufferParser(payload);
-        const event = {};
+  async start() {
+    const coolrouterProgramId = new PublicKey(COOLROUTER_PROGRAM_ID);
+    const consumerProgramId = new PublicKey(LLM_CONSUMER_PROGRAM_ID);
 
-        for (const field of eventData.requestCreated.fields) {
-          if (field.type === "string") {
-            event[field.name] = parser.readString();
-          } else if (field.type === "pubkey") {
-            event[field.name] = parser.readPubkey();
-          } else if (field.type.vec?.defined?.name === "Message") {
-            event[field.name] = parser.readStructVec(eventData.messageFields);
-          }
-        }
+    this.connection.onLogs(
+      coolrouterProgramId,
+      (logs, ctx) => this.handleCoolrouterLogs(logs, ctx.slot),
+      "confirmed"
+    );
 
-        handleRequestCreated(event, slot, logs.signature);
-      } catch (e) {
-        console.error("Parse error:", e);
+    this.connection.onLogs(
+      consumerProgramId,
+      (logs, ctx) => this.handleConsumerLogs(logs, ctx.slot),
+      "confirmed"
+    );
+
+    console.log(`Oracle node started with pubkey: ${this.oracleKeypair.publicKey.toString()}`);
+    console.log("Listening for events...");
+
+    process.on("SIGINT", () => {
+      console.log("\nShutting down...");
+      process.exit(0);
+    });
+  }
+
+  handleCoolrouterLogs(logs, slot) {
+    if (logs.err) return;
+
+    for (const log of logs.logs) {
+      if (!log.startsWith("Program data: ")) continue;
+
+      const eventDataB64 = log.substring(14);
+      const eventDataBuffer = Buffer.from(eventDataB64, "base64");
+      if (eventDataBuffer.length < 8) continue;
+
+      const eventDiscriminator = eventDataBuffer.subarray(0, 8);
+
+      if (eventDiscriminator.equals(this.eventDiscriminators.requestCreated)) {
+        this.handleRequestCreated(eventDataBuffer, slot, logs.signature);
+      } else if (eventDiscriminator.equals(this.eventDiscriminators.votingCompleted)) {
+        this.handleVotingCompleted(eventDataBuffer, slot, logs.signature);
+      } else if (eventDiscriminator.equals(this.eventDiscriminators.requestFulfilled)) {
+        this.handleRequestFulfilled(eventDataBuffer, slot, logs.signature);
       }
     }
   }
-}
 
-function handleConsumerLogs(logs, slot, eventData) {
-  if (logs.err) return;
+  handleConsumerLogs(logs, slot) {
+    if (logs.err) return;
 
-  for (const log of logs.logs) {
-    if (!log.startsWith("Program data: ")) continue;
+    for (const log of logs.logs) {
+      if (!log.startsWith("Program data: ")) continue;
 
-    const eventDataB64 = log.substring(14);
-    const eventDataBuffer = Buffer.from(eventDataB64, "base64");
-    if (eventDataBuffer.length < 8) continue;
+      const eventDataB64 = log.substring(14);
+      const eventDataBuffer = Buffer.from(eventDataB64, "base64");
+      if (eventDataBuffer.length < 8) continue;
 
-    const eventDiscriminator = eventDataBuffer.subarray(0, 8);
+      const eventDiscriminator = eventDataBuffer.subarray(0, 8);
 
-    if (eventDiscriminator.equals(eventData.responseReceived.discriminator)) {
-      try {
-        const payload = eventDataBuffer.subarray(8);
-        const parser = new BorshBufferParser(payload);
-        const event = {};
-
-        for (const field of eventData.responseReceived.fields) {
-          if (field.type === "string") {
-            event[field.name] = parser.readString();
-          }
-        }
-
-        handleResponseReceived(event, slot, logs.signature);
-      } catch (e) {
-        console.error("Parse error:", e);
+      if (eventDiscriminator.equals(this.eventDiscriminators.responseReceived)) {
+        this.handleResponseReceived(eventDataBuffer, slot, logs.signature);
       }
     }
   }
+
+  handleRequestCreated(eventDataBuffer, slot, signature) {
+    try {
+      const payload = eventDataBuffer.subarray(8);
+      const parser = new BorshBufferParser(payload);
+      const event = {};
+
+      for (const field of this.eventFields.requestCreated) {
+        if (field.type === "string") {
+          event[field.name] = parser.readString();
+        } else if (field.type === "pubkey") {
+          event[field.name] = parser.readPubkey();
+        } else if (field.type === "u8") {
+          event[field.name] = parser.readU8();
+        } else if (field.type.vec?.defined?.name === "Message") {
+          event[field.name] = parser.readStructVec(this.eventFields.message);
+        }
+      }
+
+      console.log(`\n[RequestCreated] ${event.request_id}`);
+      console.log(`  Provider: ${event.provider}, Model: ${event.model_id}`);
+      console.log(`  Min Votes: ${event.min_votes}, Threshold: ${event.approval_threshold}%`);
+      console.log(`  Slot: ${slot}, Signature: ${signature}`);
+
+      this.pendingRequests.set(event.request_id, {
+        caller_program: event.caller_program,
+        messages: event.messages,
+        min_votes: event.min_votes,
+        approval_threshold: event.approval_threshold,
+      });
+
+      setImmediate(() => this.submitVote(event.request_id, event.messages));
+    } catch (e) {
+      console.error("Parse error (RequestCreated):", e);
+    }
+  }
+
+  handleVotingCompleted(eventDataBuffer, slot, signature) {
+    try {
+      const payload = eventDataBuffer.subarray(8);
+      const parser = new BorshBufferParser(payload);
+      const event = {};
+
+      for (const field of this.eventFields.votingCompleted) {
+        if (field.type === "string") {
+          event[field.name] = parser.readString();
+        } else if (field.type.array && field.type.array[0] === "u8" && field.type.array[1] === 32) {
+          event[field.name] = parser.readBytes(32);
+        } else if (field.type === "u8") {
+          event[field.name] = parser.readU8();
+        }
+      }
+
+      console.log(`\n[VotingCompleted] ${event.request_id}`);
+      console.log(`  Winning Hash: ${event.winning_hash.toString('hex')}`);
+      console.log(`  Votes: ${event.vote_count}/${event.total_votes}`);
+      console.log(`  Slot: ${slot}, Signature: ${signature}`);
+
+      const requestData = this.pendingRequests.get(event.request_id);
+      if (requestData) {
+        requestData.winning_hash = event.winning_hash;
+        requestData.vote_count = event.vote_count;
+        requestData.total_votes = event.total_votes;
+
+        setImmediate(() => this.maybeFulfill(event.request_id, requestData));
+      }
+    } catch (e) {
+      console.error("Parse error (VotingCompleted):", e);
+    }
+  }
+
+  handleRequestFulfilled(eventDataBuffer, slot, signature) {
+    try {
+      const payload = eventDataBuffer.subarray(8);
+      const parser = new BorshBufferParser(payload);
+      const event = {};
+
+      for (const field of this.eventFields.requestFulfilled) {
+        if (field.type === "string") {
+          event[field.name] = parser.readString();
+        } else if (field.type === "u64") {
+          event[field.name] = Number(parser.readU64());
+        }
+      }
+
+      console.log(`\n[RequestFulfilled] ${event.request_id}`);
+      console.log(`  Response Length: ${event.response_length} bytes`);
+      console.log(`  Slot: ${slot}, Signature: ${signature}`);
+
+      this.pendingRequests.delete(event.request_id);
+    } catch (e) {
+      console.error("Parse error (RequestFulfilled):", e);
+    }
+  }
+
+  handleResponseReceived(eventDataBuffer, slot, signature) {
+    try {
+      const payload = eventDataBuffer.subarray(8);
+      const parser = new BorshBufferParser(payload);
+      const event = {};
+
+      for (const field of this.eventFields.responseReceived) {
+        if (field.type === "string") {
+          event[field.name] = parser.readString();
+        }
+      }
+
+      console.log(`\n[ResponseReceived] ${event.request_id}`);
+      console.log(`  Preview: ${event.response_preview}`);
+      console.log(`  Slot: ${slot}, Signature: ${signature}`);
+    } catch (e) {
+      console.error("Parse error (ResponseReceived):", e);
+    }
+  }
+
+  async submitVote(requestId, messages) {
+    try {
+      const llmResponse = "Joe Mama Deez Nuts";
+      const responseHash = computeResponseHash(llmResponse);
+
+      const requestData = this.pendingRequests.get(requestId);
+      if (requestData) {
+        requestData.myResponse = llmResponse;
+        requestData.myHash = responseHash;
+      }
+
+      console.log(`\n[Oracle] Submitting vote for ${requestId}`);
+      console.log(`  Response: "${llmResponse}"`);
+      console.log(`  Response hash: ${responseHash.toString('hex').substring(0, 16)}...`);
+
+      const coolrouterProgramId = new PublicKey(COOLROUTER_PROGRAM_ID);
+      const [requestPda] = PublicKey.findProgramAddressSync(
+        [Buffer.from("request"), Buffer.from(requestId)],
+        coolrouterProgramId
+      );
+
+      const instructionDef = this.coolrouterIdl.instructions.find(ix => ix.name === "submit_vote");
+      const discriminator = Buffer.from(instructionDef.discriminator);
+
+      const instructionData = Buffer.concat([
+        discriminator,
+        responseHash,
+      ]);
+
+      const keys = [
+        { pubkey: requestPda, isSigner: false, isWritable: true },
+        { pubkey: this.oracleKeypair.publicKey, isSigner: true, isWritable: false },
+      ];
+
+      const instruction = new TransactionInstruction({
+        programId: coolrouterProgramId,
+        keys,
+        data: instructionData,
+      });
+
+      const transaction = new Transaction().add(instruction);
+      transaction.feePayer = this.oracleKeypair.publicKey;
+      transaction.recentBlockhash = (await this.connection.getLatestBlockhash()).blockhash;
+
+      const signature = await this.connection.sendTransaction(transaction, [this.oracleKeypair], {
+        skipPreflight: false,
+        preflightCommitment: "confirmed",
+      });
+
+      await this.connection.confirmTransaction(signature, "confirmed");
+      console.log(`[Oracle] Vote submitted: ${signature}`);
+    } catch (e) {
+      console.error(`[Oracle] Failed to submit vote for ${requestId}:`, e.message);
+    }
+  }
+
+  async maybeFulfill(requestId, requestData) {
+    try {
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      if (!requestData.myResponse || !requestData.myHash) {
+        console.log(`[Oracle] No response stored for ${requestId}, skipping fulfill`);
+        return;
+      }
+
+      if (!requestData.winning_hash.equals(requestData.myHash)) {
+        console.log(`[Oracle] Our hash didn't win for ${requestId}, skipping fulfill`);
+        return;
+      }
+
+      const totalVotes = requestData.total_votes;
+      const voteCount = requestData.vote_count;
+      const maxFulfillers = Math.max(1, Math.min(Math.floor(totalVotes * 0.2), 4));
+      const probability = maxFulfillers / totalVotes;
+
+      const random = Math.random();
+      console.log(`\n[Oracle] Fulfill probability for ${requestId}: ${(probability * 100).toFixed(2)}%`);
+      console.log(`[Oracle] Random: ${(random * 100).toFixed(2)}%, Max fulfillers: ${maxFulfillers}/${totalVotes}`);
+
+      if (random >= probability) {
+        console.log(`[Oracle] Not selected to fulfill ${requestId}`);
+        return;
+      }
+
+      console.log(`[Oracle] Selected to fulfill ${requestId}!`);
+
+      await this.fulfill(requestId, requestData);
+    } catch (e) {
+      console.error(`[Oracle] Error in maybeFulfill for ${requestId}:`, e.message);
+    }
+  }
+
+  async fulfill(requestId, requestData) {
+    try {
+      const coolrouterProgramId = new PublicKey(COOLROUTER_PROGRAM_ID);
+      const [requestPda] = PublicKey.findProgramAddressSync(
+        [Buffer.from("request"), Buffer.from(requestId)],
+        coolrouterProgramId
+      );
+
+      const accountInfo = await this.connection.getAccountInfo(requestPda);
+      if (!accountInfo) {
+        console.error(`[Oracle] Request account not found for ${requestId}`);
+        return;
+      }
+
+      const requestAccount = this.coolrouterCoder.accounts.decode("LLMRequest", accountInfo.data);
+
+      const statusKey = Object.keys(requestAccount.status)[0];
+      
+      if (statusKey !== "VotingCompleted") {
+        console.log(`[Oracle] Request ${requestId} not in VotingCompleted state (current: ${statusKey})`);
+        return;
+      }
+
+      const callerProgram = requestAccount.callerProgram || requestAccount.caller_program;
+      const callbackAccounts = requestAccount.callbackAccounts || requestAccount.callback_accounts || [];
+      const callbackWritable = requestAccount.callbackWritable || requestAccount.callback_writable || [];
+
+      if (!callerProgram) {
+        console.error(`[Oracle] Cannot find callerProgram field in account`);
+        return;
+      }
+
+      const llmResponse = Buffer.from(requestData.myResponse);
+
+      const instructionDef = this.coolrouterIdl.instructions.find(ix => ix.name === "fulfill_request");
+      const discriminator = Buffer.from(instructionDef.discriminator);
+
+      const instructionData = Buffer.concat([
+        discriminator,
+        Buffer.from(new Uint8Array(new Uint32Array([llmResponse.length]).buffer)),
+        llmResponse,
+      ]);
+
+      const keys = [
+        { pubkey: requestPda, isSigner: false, isWritable: true },
+        { pubkey: this.oracleKeypair.publicKey, isSigner: true, isWritable: true },
+        { pubkey: callerProgram, isSigner: false, isWritable: false },
+      ];
+
+      const remainingAccounts = callbackAccounts.map((pubkey, i) => ({
+        pubkey: pubkey,
+        isSigner: false,
+        isWritable: callbackWritable[i],
+      }));
+
+      keys.push(...remainingAccounts);
+
+      const instruction = new TransactionInstruction({
+        programId: coolrouterProgramId,
+        keys,
+        data: instructionData,
+      });
+
+      const transaction = new Transaction().add(instruction);
+      transaction.feePayer = this.oracleKeypair.publicKey;
+      transaction.recentBlockhash = (await this.connection.getLatestBlockhash()).blockhash;
+
+      const signature = await this.connection.sendTransaction(transaction, [this.oracleKeypair], {
+        skipPreflight: false,
+        preflightCommitment: "confirmed",
+      });
+
+      await this.connection.confirmTransaction(signature, "confirmed");
+      console.log(`[Oracle] Fulfilled ${requestId}: ${signature}`);
+    } catch (e) {
+      console.error(`[Oracle] Failed to fulfill ${requestId}:`, e.message);
+    }
+  }
+
+  async callLLM(messages) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    return "Joe Mama Deez Nuts";
+  }
 }
 
-function handleRequestCreated(event, slot, signature) {
-  console.log(`\nRequest ID: ${event.request_id}`);
-  console.log(`Caller Program: ${event.caller_program.toString()}`);
-  console.log(`Provider: ${event.provider}`);
-  console.log(`Model ID: ${event.model_id}`);
-  console.log(`Slot: ${slot}`);
-  console.log(`Signature: ${signature}`);
-  console.log(`Messages: ${event.messages.length}`);
-  event.messages.forEach((msg, idx) => {
-    console.log(`  [${idx}] ${msg.role}: ${msg.content.substring(0, 100)}`);
-  });
-}
-
-function handleResponseReceived(event, slot, signature) {
-  console.log(`\nResponse Received: ${event.request_id}`);
-  console.log(`Preview: ${event.response_preview}`);
-  console.log(`Slot: ${slot}`);
-  console.log(`Signature: ${signature}`);
-}
-
-main().catch(console.error);
+const oracle = new OracleNode();
+oracle.start().catch(console.error);
