@@ -2,7 +2,7 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::{instruction::Instruction, program::invoke};
 use solana_program::hash::hash;
 
-declare_id!("DwPxc47Ss4Tyt3q8oT1pu58od2KjB5ZpSihQM3432Dqm");
+declare_id!("CATsZNcHms98EcQo1qzGcA3XLPf47NLhQC5g2cRe19Gu");
 
 #[program]
 pub mod coolrouter {
@@ -60,7 +60,7 @@ pub mod coolrouter {
 
     pub fn fulfill_request<'info>(
         ctx: Context<'_, '_, '_, 'info, FulfillRequest<'info>>,
-        response: String,
+        response: Vec<u8>,
     ) -> Result<()> {
         let request = &mut ctx.accounts.request;
         

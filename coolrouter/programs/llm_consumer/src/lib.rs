@@ -1,9 +1,19 @@
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::instruction::Instruction;
-use sha2::{Digest, Sha256};
+use coolrouter_cpi::{create_llm_request, Message};
 
 // Replace with actual program ID after deployment
-declare_id!("3YZkQzWFLJcTcLQRJpiUy41pjWzw7cWRhqamswiTfqjN");
+declare_id!("BrRX5CdLjXZDPzaQFY1BnjdsLeqMED1JeKKSjpnaxU1R");
+
+// Constants for space allocation
+const MAX_REQUEST_ID_LEN: usize = 60;  // Max 60 bytes for request_id (not Unicode chars)
+const MAX_RESPONSE_LEN: usize = 2000;  // Max 2000 bytes for response
+
+// Calculate account space from constants to keep them in sync
+const ACCOUNT_SPACE: usize = 8                          // discriminator
+    + (4 + MAX_REQUEST_ID_LEN)                          // request_id (String: 4-byte length + data)
+    + (4 + MAX_RESPONSE_LEN)                            // response (Vec<u8>: 4-byte length + data)
+    + 1                                                  // has_response (bool)
+    + 32;                                                // authority (Pubkey)
 
 #[program]
 pub mod llm_consumer {
@@ -17,12 +27,17 @@ pub mod llm_consumer {
     ) -> Result<()> {
         let consumer_state = &mut ctx.accounts.consumer_state;
         
-        // Get CoolRouter program ID from account
-        let coolrouter_program_id = ctx.accounts.coolrouter_program.key();
+        // Validate request_id length to match our space allocation
+        // Note: .len() returns bytes, not Unicode character count
+        // For typical ASCII/UUID request IDs, this is what we want
+        require!(
+            request_id.len() <= MAX_REQUEST_ID_LEN,
+            ErrorCode::RequestIdTooLong
+        );
         
         // Store request info
         consumer_state.request_id = request_id.clone();
-        consumer_state.response = String::new();
+        consumer_state.response = Vec::new();
         consumer_state.has_response = false;
         consumer_state.authority = ctx.accounts.authority.key();
         
@@ -32,67 +47,23 @@ pub mod llm_consumer {
             content: prompt,
         }];
         
-        // Create accounts vec for CPI - include our consumer_state as a callback account
-        let accounts_for_callback = vec![
+        // Create accounts vec for callback
+        let callback_accounts = vec![
             ctx.accounts.consumer_state.to_account_info(),
         ];
         
-        // Build the CPI context
-        let cpi_accounts = vec![
+        // Use the CoolRouter CPI package
+        create_llm_request(
             ctx.accounts.request_pda.to_account_info(),
             ctx.accounts.authority.to_account_info(),
             ctx.accounts.consumer_program.to_account_info(),
             ctx.accounts.system_program.to_account_info(),
-        ];
-        
-        // Serialize the instruction data manually
-        let mut data = Vec::new();
-        
-        // Calculate discriminator using SHA256 hash of "global:create_request"
-        let mut hasher = Sha256::new();
-        hasher.update(b"global:create_request");
-        let hash_result = hasher.finalize();
-        let discriminator: [u8; 8] = hash_result[..8].try_into().unwrap();
-        data.extend_from_slice(&discriminator);
-        
-        // Serialize parameters
-        data.extend_from_slice(&request_id.try_to_vec()?);
-        data.extend_from_slice(&"openai".to_string().try_to_vec()?); // provider
-        data.extend_from_slice(&"gpt-4".to_string().try_to_vec()?); // model_id
-        data.extend_from_slice(&messages.try_to_vec()?);
-        
-        // Create the instruction
-        let mut account_metas = cpi_accounts
-            .iter()
-            .map(|acc| AccountMeta {
-                pubkey: *acc.key,
-                is_signer: acc.is_signer,
-                is_writable: acc.is_writable,
-            })
-            .collect::<Vec<_>>();
-        
-        // Add remaining accounts (callback accounts)
-        for acc in &accounts_for_callback {
-            account_metas.push(AccountMeta {
-                pubkey: *acc.key,
-                is_signer: false,
-                is_writable: true,
-            });
-        }
-        
-        let ix = Instruction {
-            program_id: coolrouter_program_id.clone(),
-            accounts: account_metas,
-            data,
-        };
-        
-        // Invoke the CoolRouter
-        let mut all_accounts = cpi_accounts;
-        all_accounts.extend(accounts_for_callback);
-        
-        anchor_lang::solana_program::program::invoke(
-            &ix,
-            &all_accounts,
+            ctx.accounts.coolrouter_program.key(),
+            callback_accounts,
+            request_id.clone(),
+            "openai".to_string(),
+            "gpt-4".to_string(),
+            messages,
         )?;
         
         msg!("LLM request created with ID: {}", request_id);
@@ -104,7 +75,7 @@ pub mod llm_consumer {
     pub fn llm_callback(
         ctx: Context<LLMCallback>,
         request_id: String,
-        response: String,
+        response: Vec<u8>,
     ) -> Result<()> {
         let consumer_state = &mut ctx.accounts.consumer_state;
         
@@ -113,13 +84,26 @@ pub mod llm_consumer {
             ErrorCode::RequestIdMismatch
         );
         
+        // Validate response length
+        require!(
+            response.len() <= MAX_RESPONSE_LEN,
+            ErrorCode::ResponseTooLarge
+        );
+        
         // Store the response
         consumer_state.response = response.clone();
         consumer_state.has_response = true;
         
+        // Try to convert to string for preview (if it's valid UTF-8)
+        let response_preview = String::from_utf8(response.clone())
+            .unwrap_or_else(|_| format!("[Binary data: {} bytes]", response.len()))
+            .chars()
+            .take(100)
+            .collect();
+        
         emit!(ResponseReceived {
             request_id,
-            response_preview: response.chars().take(100).collect(),
+            response_preview,
         });
         
         msg!("LLM response received and stored");
@@ -128,14 +112,19 @@ pub mod llm_consumer {
     }
 
     /// Query the stored response
-    pub fn get_response(ctx: Context<GetResponse>) -> Result<()> {
+    pub fn get_response(ctx: Context<GetResponse>) -> Result<Vec<u8>> {
         let consumer_state = &ctx.accounts.consumer_state;
+        
+        // Verify the caller is the original authority who created the request
+        require_keys_eq!(
+            consumer_state.authority,
+            ctx.accounts.authority.key(),
+            ErrorCode::Unauthorized
+        );
         
         require!(consumer_state.has_response, ErrorCode::NoResponse);
         
-        msg!("Response: {}", consumer_state.response);
-        
-        Ok(())
+        Ok(consumer_state.response.clone())
     }
 }
 
@@ -145,7 +134,8 @@ pub struct RequestLLMResponse<'info> {
     #[account(
         init,
         payer = authority,
-        space = 8 + 64 + 4 + 2000 + 1 + 32,
+        // Use constant to ensure space calculation matches our limits
+        space = ACCOUNT_SPACE,
         seeds = [b"consumer_state", authority.key().as_ref(), request_id.as_bytes()],
         bump
     )]
@@ -181,16 +171,10 @@ pub struct GetResponse<'info> {
 
 #[account]
 pub struct ConsumerState {
-    pub request_id: String,
-    pub response: String,
+    pub request_id: String,       // Max 60 bytes (not Unicode chars)
+    pub response: Vec<u8>,        // Max 2000 bytes
     pub has_response: bool,
     pub authority: Pubkey,
-}
-
-#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
-pub struct Message {
-    pub role: String,
-    pub content: String,
 }
 
 #[event]
@@ -205,4 +189,10 @@ pub enum ErrorCode {
     RequestIdMismatch,
     #[msg("No response available yet")]
     NoResponse,
+    #[msg("Request ID exceeds 60 bytes")]
+    RequestIdTooLong,
+    #[msg("Response exceeds 2000 bytes")]
+    ResponseTooLarge,
+    #[msg("Unauthorized: caller is not the request authority")]
+    Unauthorized,
 }

@@ -1,5 +1,5 @@
 [workspace]
-members = [
+members = [ "coolroutercpi",
     "programs/*"
 ]
 resolver = "2"

@@ -3,15 +3,15 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
-// --- Configuration ---
-const COOLROUTER_PROGRAM_ID = "DwPxc47Ss4Tyt3q8oT1pu58od2KjB5ZpSihQM3432Dqm";
+const COOLROUTER_PROGRAM_ID = "CATsZNcHms98EcQo1qzGcA3XLPf47NLhQC5g2cRe19Gu";
+const LLM_CONSUMER_PROGRAM_ID = "BrRX5CdLjXZDPzaQFY1BnjdsLeqMED1JeKKSjpnaxU1R";
 const RPC_ENDPOINT = process.env.RPC_ENDPOINT || "http://localhost:8899";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const IDL_PATH = path.join(__dirname, "coolrouter/target/idl/coolrouter.json");
+const COOLROUTER_IDL_PATH = path.join(__dirname, "coolrouter/target/idl/coolrouter.json");
+const CONSUMER_IDL_PATH = path.join(__dirname, "coolrouter/target/idl/llm_consumer.json");
 
-// --- Dynamic Parser Class ---
 class BorshBufferParser {
   constructor(buffer) {
     this.buffer = buffer;
@@ -27,24 +27,17 @@ class BorshBufferParser {
   readString() {
     const length = this.readU32();
     if (length === 0) return "";
-    if (this.offset + length > this.buffer.length) {
-      throw new Error("Buffer out of bounds trying to read string");
-    }
     const strBuffer = this.buffer.subarray(this.offset, this.offset + length);
     this.offset += length;
     return strBuffer.toString("utf8");
   }
 
   readPubkey() {
-    if (this.offset + 32 > this.buffer.length) {
-      throw new Error("Buffer out of bounds trying to read pubkey");
-    }
     const pubkeyBuffer = this.buffer.subarray(this.offset, this.offset + 32);
     this.offset += 32;
     return new PublicKey(pubkeyBuffer);
   }
 
-  // Dynamically reads a struct based on a field layout
   readStruct(fields) {
     const struct = {};
     for (const field of fields) {
@@ -53,12 +46,10 @@ class BorshBufferParser {
       } else if (field.type === "pubkey") {
         struct[field.name] = this.readPubkey();
       }
-      // Add other types (u64, etc.) here if needed
     }
     return struct;
   }
 
-  // Dynamically reads a Vec<Struct>
   readStructVec(fields) {
     const length = this.readU32();
     const items = [];
@@ -70,115 +61,75 @@ class BorshBufferParser {
 }
 
 function modify_idl(idl_object) {
-  if (!idl_object || !Array.isArray(idl_object.types) || !Array.isArray(idl_object.events)) {
-    console.error("Invalid IDL object structure. Missing 'types' or 'events' array.");
-    return idl_object;
-  }
-
-  // Create a map of types by name for efficient lookup.
   const typeMap = new Map();
   for (const typeDef of idl_object.types) {
-    if (typeDef && typeDef.name) {
-      typeMap.set(typeDef.name, typeDef);
-    }
+    typeMap.set(typeDef.name, typeDef);
   }
 
-  // Iterate over each event and populate its fields from the type map.
   for (const event of idl_object.events) {
-    if (event && event.name && typeMap.has(event.name)) {
+    if (typeMap.has(event.name)) {
       const correspondingType = typeMap.get(event.name);
-
-      // Check if the type is a struct and has fields
-      if (correspondingType.type &&
-          correspondingType.type.kind === 'struct' &&
-          Array.isArray(correspondingType.type.fields)) {
-        
-        // Assign the fields to the event object
+      if (correspondingType.type?.kind === 'struct' && correspondingType.type.fields) {
         event.fields = correspondingType.type.fields;
       }
     }
   }
 
-  // Return the modified object (though it's modified in place)
   return idl_object;
 }
 
-// --- Main Function ---
 async function main() {
-  console.log("🚀 Starting listener with DYNAMIC manual parser...");
-
-  // 1. Load the broken IDL
-  console.log(`📂 Loading broken IDL from: ${IDL_PATH}`);
-  let idl;
-  try {
-    const idlContent = fs.readFileSync(IDL_PATH, "utf8");
-    idl = JSON.parse(idlContent);
-  } catch (e) {
-    console.error(`❌ Failed to load IDL: ${e.message}`);
-    process.exit(1);
-  }
-
-  idl = modify_idl(idl);
-
-  // 2. Extract Event Info from the BROKEN IDL (no hardcoding)
-  console.log("🔧 Dynamically building parser from broken IDL...");
+  const coolrouterIdl = modify_idl(JSON.parse(fs.readFileSync(COOLROUTER_IDL_PATH, "utf8")));
+  const consumerIdl = modify_idl(JSON.parse(fs.readFileSync(CONSUMER_IDL_PATH, "utf8")));
   
-  // Find discriminator from 'events'
-  const eventInfo = idl.events.find(e => e.name === "RequestCreated");
-  if (!eventInfo) {
-    console.error("❌ Cannot find 'RequestCreated' in IDL 'events' array.");
-    process.exit(1);
-  }
-  const discriminator = Buffer.from(eventInfo.discriminator);
+  const requestCreatedInfo = coolrouterIdl.events.find(e => e.name === "RequestCreated");
+  const requestCreatedDiscriminator = Buffer.from(requestCreatedInfo.discriminator);
 
-  // Find event fields from 'types'
-  const eventType = idl.types.find(t => t.name === "RequestCreated");
-  if (!eventType) {
-    console.error("❌ Cannot find 'RequestCreated' in IDL 'types' array.");
-    process.exit(1);
-  }
-  const eventFields = eventType.type.fields;
+  const requestCreatedType = coolrouterIdl.types.find(t => t.name === "RequestCreated");
+  const requestCreatedFields = requestCreatedType.type.fields;
 
-  // Find Message struct fields from 'types'
-  const messageType = idl.types.find(t => t.name === "Message");
-  if (!messageType) {
-    console.error("❌ Cannot find 'Message' in IDL 'types' array.");
-    process.exit(1);
-  }
+  const messageType = coolrouterIdl.types.find(t => t.name === "Message");
   const messageFields = messageType.type.fields;
 
-  // 3. Create Connection
+  const responseReceivedInfo = consumerIdl.events.find(e => e.name === "ResponseReceived");
+  const responseReceivedDiscriminator = Buffer.from(responseReceivedInfo.discriminator);
+
+  const responseReceivedType = consumerIdl.types.find(t => t.name === "ResponseReceived");
+  const responseReceivedFields = responseReceivedType.type.fields;
+
   const connection = new Connection(RPC_ENDPOINT, "confirmed");
-  const programId = new PublicKey(COOLROUTER_PROGRAM_ID);
+  const coolrouterProgramId = new PublicKey(COOLROUTER_PROGRAM_ID);
+  const consumerProgramId = new PublicKey(LLM_CONSUMER_PROGRAM_ID);
 
-  // 4. Start Listening
-  console.log("🎧 Starting CoolRouter event listener...");
-  console.log(`📡 Program ID: ${programId.toString()}`);
-  console.log(`🔗 RPC Endpoint: ${connection.rpcEndpoint}\n`);
-
-  const subscriptionId = connection.onLogs(
-    programId,
+  connection.onLogs(
+    coolrouterProgramId,
     (logs, ctx) => {
-      handleLogs(logs, ctx.slot, discriminator, eventFields, messageFields);
+      handleCoolrouterLogs(logs, ctx.slot, {
+        requestCreated: { discriminator: requestCreatedDiscriminator, fields: requestCreatedFields },
+        messageFields
+      });
     },
     "confirmed"
   );
 
-  console.log("✅ Event listener started successfully!");
-  console.log("Waiting for events...\n");
+  connection.onLogs(
+    consumerProgramId,
+    (logs, ctx) => {
+      handleConsumerLogs(logs, ctx.slot, {
+        responseReceived: { discriminator: responseReceivedDiscriminator, fields: responseReceivedFields }
+      });
+    },
+    "confirmed"
+  );
+
+  console.log("Listening for events...");
 
   process.on("SIGINT", () => {
-    console.log("\n🛑 Stopping event listener...");
-    connection.removeOnLogsListener(subscriptionId);
-    console.log("✅ Event listener stopped.");
     process.exit(0);
   });
 }
 
-/**
- * Handles incoming logs from the subscription
- */
-function handleLogs(logs, slot, discriminator, eventFields, messageFields) {
+function handleCoolrouterLogs(logs, slot, eventData) {
   if (logs.err) return;
 
   for (const log of logs.logs) {
@@ -190,64 +141,80 @@ function handleLogs(logs, slot, discriminator, eventFields, messageFields) {
 
     const eventDiscriminator = eventDataBuffer.subarray(0, 8);
 
-    if (eventDiscriminator.equals(discriminator)) {
-      console.log(`\n[DEBUG] Received logs for signature: ${logs.signature}`);
-      console.log(`[DEBUG] Found event data (base64): ${eventDataB64}`);
-      console.log("[DEBUG] Matched 'RequestCreated' discriminator.");
-
+    if (eventDiscriminator.equals(eventData.requestCreated.discriminator)) {
       try {
         const payload = eventDataBuffer.subarray(8);
-        
-        // 6. Dynamically deserialize the payload
         const parser = new BorshBufferParser(payload);
         const event = {};
 
-        // Loop through the fields we found in the IDL and parse them
-        for (const field of eventFields) {
+        for (const field of eventData.requestCreated.fields) {
           if (field.type === "string") {
             event[field.name] = parser.readString();
           } else if (field.type === "pubkey") {
             event[field.name] = parser.readPubkey();
           } else if (field.type.vec?.defined?.name === "Message") {
-            event[field.name] = parser.readStructVec(messageFields);
+            event[field.name] = parser.readStructVec(eventData.messageFields);
           }
         }
 
         handleRequestCreated(event, slot, logs.signature);
       } catch (e) {
-        console.error("❌ [PARSE ERROR] Failed to manually deserialize event:");
-        console.error(e);
+        console.error("Parse error:", e);
       }
     }
   }
 }
 
-/**
- * Handle RequestCreated event
- */
+function handleConsumerLogs(logs, slot, eventData) {
+  if (logs.err) return;
+
+  for (const log of logs.logs) {
+    if (!log.startsWith("Program data: ")) continue;
+
+    const eventDataB64 = log.substring(14);
+    const eventDataBuffer = Buffer.from(eventDataB64, "base64");
+    if (eventDataBuffer.length < 8) continue;
+
+    const eventDiscriminator = eventDataBuffer.subarray(0, 8);
+
+    if (eventDiscriminator.equals(eventData.responseReceived.discriminator)) {
+      try {
+        const payload = eventDataBuffer.subarray(8);
+        const parser = new BorshBufferParser(payload);
+        const event = {};
+
+        for (const field of eventData.responseReceived.fields) {
+          if (field.type === "string") {
+            event[field.name] = parser.readString();
+          }
+        }
+
+        handleResponseReceived(event, slot, logs.signature);
+      } catch (e) {
+        console.error("Parse error:", e);
+      }
+    }
+  }
+}
+
 function handleRequestCreated(event, slot, signature) {
-  console.log("\n🆕 REQUEST CREATED EVENT");
-  console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-  console.log(`Request ID: ${event.request_id}`);
+  console.log(`\nRequest ID: ${event.request_id}`);
   console.log(`Caller Program: ${event.caller_program.toString()}`);
   console.log(`Provider: ${event.provider}`);
   console.log(`Model ID: ${event.model_id}`);
   console.log(`Slot: ${slot}`);
   console.log(`Signature: ${signature}`);
-  console.log(`\nMessages (${event.messages.length}):`);
+  console.log(`Messages: ${event.messages.length}`);
   event.messages.forEach((msg, idx) => {
-    const content = msg.content || "(no content)";
-    console.log(
-      `  [${idx}] ${msg.role}: ${content.substring(0, 100)}${
-        content.length > 100 ? "..." : ""
-      }`
-    );
+    console.log(`  [${idx}] ${msg.role}: ${msg.content.substring(0, 100)}`);
   });
-  console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 }
 
-// Run the main function
-main().catch((error) => {
-  console.error("❌ Fatal Error:", error);
-  process.exit(1);
-});
+function handleResponseReceived(event, slot, signature) {
+  console.log(`\nResponse Received: ${event.request_id}`);
+  console.log(`Preview: ${event.response_preview}`);
+  console.log(`Slot: ${slot}`);
+  console.log(`Signature: ${signature}`);
+}
+
+main().catch(console.error);

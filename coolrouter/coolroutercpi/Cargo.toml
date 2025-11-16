@@ -1,0 +1,23 @@
+[package]
+name = "coolrouter-cpi"
+version = "0.1.4"
+edition = "2021"
+authors = ["Your Name <your.email@example.com>"]
+description = "CPI client for CoolRouter - Solana LLM inference router program"
+documentation = "https://docs.rs/coolrouter-cpi"
+homepage = "https://github.com/yourusername/coolrouter-cpi"
+repository = "https://github.com/yourusername/coolrouter-cpi"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+keywords = ["solana", "blockchain", "llm", "ai", "anchor"]
+categories = ["cryptography::cryptocurrencies", "api-bindings"]
+
+[dependencies]
+anchor-lang = "0.32.1"  # ← Changed from 0.29.0 to 0.32.1
+sha2 = "0.10"
+
+[lib]
+crate-type = ["lib"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }
