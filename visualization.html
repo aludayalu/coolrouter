@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CoolRouter Visualization</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background-color: #000;
+            color: #fff;
+            font-family: 'Arial', sans-serif;
+            overflow: hidden;
+            height: 100vh;
+        }
+
+        .container {
+            display: flex;
+            height: 100vh;
+            position: relative;
+        }
+
+        .web2-section {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+            position: relative;
+        }
+
+        .web3-section {
+            flex: 2;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 100px;
+            padding: 20px;
+            position: relative;
+        }
+
+        .divider {
+            width: 2px;
+            height: 100%;
+            background: repeating-linear-gradient(
+                to bottom,
+                #fff 0px,
+                #fff 10px,
+                transparent 10px,
+                transparent 20px
+            );
+            position: absolute;
+            left: 33.33%;
+        }
+
+        .oracle {
+            width: 120px;
+            height: 80px;
+            background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%);
+            border-radius: 12px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            margin: 15px 0;
+            position: relative;
+            box-shadow: 0 4px 15px rgba(59, 130, 246, 0.3);
+            transition: all 0.3s ease;
+        }
+
+        .oracle.active {
+            box-shadow: 0 0 20px rgba(59, 130, 246, 0.8);
+            transform: scale(1.05);
+        }
+
+        .oracle.voted {
+            background: linear-gradient(135deg, #065f46 0%, #10b981 100%);
+        }
+
+        .oracle.fulfilling {
+            box-shadow: 0 0 25px rgba(16, 185, 129, 0.9);
+            border: 2px solid #10b981;
+        }
+
+        .oracle.processing {
+            position: relative;
+        }
+
+        .spinner {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 30px;
+            height: 30px;
+            border: 3px solid rgba(255, 255, 255, 0.3);
+            border-top-color: #fff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            z-index: 10;
+        }
+
+        @keyframes spin {
+            to {
+                transform: translate(-50%, -50%) rotate(360deg);
+            }
+        }
+
+        .spinner.hidden {
+            display: none;
+        }
+
+        .oracle-label {
+            font-size: 12px;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+
+        .oracle-name {
+            font-size: 14px;
+        }
+
+        .contract {
+            width: 180px;
+            height: 120px;
+            background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%);
+            border-radius: 16px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            position: relative;
+            box-shadow: 0 4px 20px rgba(59, 130, 246, 0.3);
+            transition: all 0.3s ease;
+        }
+
+        .contract.active {
+            box-shadow: 0 0 30px rgba(59, 130, 246, 0.8);
+            transform: scale(1.05);
+        }
+
+        .contract-label {
+            font-size: 14px;
+            font-weight: bold;
+            margin-bottom: 8px;
+        }
+
+        .contract-type {
+            font-size: 12px;
+            opacity: 0.8;
+        }
+
+        .router-contract {
+            position: relative;
+        }
+
+        .caller-contract {
+            position: relative;
+        }
+
+        .flow-animation {
+            position: absolute;
+            width: 60px;
+            height: 40px;
+            background: rgba(255, 255, 255, 0.9);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+            font-weight: bold;
+            color: #000;
+            box-shadow: 0 2px 10px rgba(255, 255, 255, 0.5);
+            z-index: 10;
+            pointer-events: none;
+        }
+
+        .vote-count {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 18px;
+            font-weight: bold;
+            color: #10b981;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+            z-index: 5;
+        }
+
+        .vote-count.visible {
+            opacity: 1;
+        }
+
+        .section-label {
+            position: absolute;
+            bottom: 20px;
+            font-size: 16px;
+            font-weight: bold;
+        }
+
+        .web2-section .section-label {
+            left: 50%;
+            transform: translateX(-50%);
+        }
+
+        .status-indicator {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            padding: 10px 20px;
+            background: rgba(59, 130, 246, 0.2);
+            border: 1px solid #3b82f6;
+            border-radius: 8px;
+            font-size: 12px;
+        }
+
+        .status-indicator.connected {
+            background: rgba(16, 185, 129, 0.2);
+            border-color: #10b981;
+        }
+
+        @keyframes pulse {
+            0%, 100% {
+                opacity: 1;
+            }
+            50% {
+                opacity: 0.5;
+            }
+        }
+
+        .pulsing {
+            animation: pulse 1s ease-in-out infinite;
+        }
+    </style>
+</head>
+<body>
+    <div class="status-indicator" id="statusIndicator">Disconnected</div>
+    
+    <div class="container">
+        <div class="divider"></div>
+        
+        <div class="web2-section">
+            <div class="section-label">Web2</div>
+            <div class="oracle" id="oracleA">
+                <div class="oracle-label">Oracle</div>
+                <div class="oracle-name">A</div>
+                <div class="spinner hidden" id="spinnerA"></div>
+            </div>
+            <div class="oracle" id="oracleB">
+                <div class="oracle-label">Oracle</div>
+                <div class="oracle-name">B</div>
+                <div class="spinner hidden" id="spinnerB"></div>
+            </div>
+            <div class="oracle" id="oracleC">
+                <div class="oracle-label">Oracle</div>
+                <div class="oracle-name">C</div>
+                <div class="spinner hidden" id="spinnerC"></div>
+            </div>
+        </div>
+
+        <div class="web3-section">
+            <div class="section-label">Web3</div>
+            <div class="vote-count" id="voteCount"></div>
+            
+            <div class="contract router-contract" id="routerContract">
+                <div class="contract-label">Smart Contract</div>
+                <div class="contract-type">router</div>
+            </div>
+
+            <div class="contract caller-contract" id="callerContract">
+                <div class="contract-label">Smart Contract</div>
+                <div class="contract-type">caller</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const ws = new WebSocket('ws://localhost:7777');
+        const statusIndicator = document.getElementById('statusIndicator');
+        const voteCount = document.getElementById('voteCount');
+        
+        const oracles = {
+            A: document.getElementById('oracleA'),
+            B: document.getElementById('oracleB'),
+            C: document.getElementById('oracleC')
+        };
+        
+        const spinners = {
+            A: document.getElementById('spinnerA'),
+            B: document.getElementById('spinnerB'),
+            C: document.getElementById('spinnerC')
+        };
+        
+        const routerContract = document.getElementById('routerContract');
+        const callerContract = document.getElementById('callerContract');
+
+        let activeRequestId = null;
+        let voteStates = { A: false, B: false, C: false };
+        let voteCounts = { total: 0, current: 0 };
+        let voteQueue = [];
+        let isProcessingVotes = false;
+
+        ws.onopen = () => {
+            statusIndicator.textContent = 'Connected';
+            statusIndicator.classList.add('connected');
+        };
+
+        ws.onclose = () => {
+            statusIndicator.textContent = 'Disconnected';
+            statusIndicator.classList.remove('connected');
+            setTimeout(() => {
+                const ws = new WebSocket('ws://localhost:7777');
+            }, 3000);
+        };
+
+        ws.onerror = (error) => {
+            console.error('WebSocket error:', error);
+        };
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            handleEvent(data);
+        };
+
+        function handleEvent(data) {
+            switch(data.type) {
+                case 'RequestCreated':
+                    handleRequestCreated(data);
+                    break;
+                case 'VotingCompleted':
+                    handleVotingCompleted(data);
+                    break;
+                case 'RequestFulfilled':
+                    handleRequestFulfilled(data);
+                    break;
+                case 'VoteSubmitted':
+                    handleVoteSubmitted(data);
+                    break;
+            }
+        }
+
+        function handleRequestCreated(data) {
+            activeRequestId = data.request_id;
+            voteStates = { A: false, B: false, C: false };
+            voteCounts = { total: 0, current: 0 };
+            voteQueue = [];
+            isProcessingVotes = false;
+            
+            // Reset all oracles
+            Object.values(oracles).forEach(oracle => {
+                oracle.classList.remove('voted', 'active', 'processing', 'fulfilling');
+            });
+            
+            Object.values(spinners).forEach(spinner => {
+                spinner.classList.add('hidden');
+            });
+            
+            routerContract.classList.remove('active');
+            callerContract.classList.remove('active');
+            voteCount.classList.remove('visible');
+            
+            // Animate request from caller to router
+            animateFlow(
+                callerContract,
+                routerContract,
+                'Request',
+                () => {
+                    routerContract.classList.add('active');
+                }
+            );
+            
+            // Then animate from router to all oracles
+            setTimeout(() => {
+                const oracleIds = ['A', 'B', 'C'];
+                let completedFlows = 0;
+                
+                oracleIds.forEach((oracleId, index) => {
+                    setTimeout(() => {
+                        animateFlow(
+                            routerContract,
+                            oracles[oracleId],
+                            'Request',
+                            () => {
+                                oracles[oracleId].classList.add('active');
+                                completedFlows++;
+                                
+                                // When all requests have arrived, start processing
+                                if (completedFlows === 3) {
+                                    startProcessing();
+                                }
+                            }
+                        );
+                    }, index * 200);
+                });
+            }, 800);
+        }
+
+        function startProcessing() {
+            isProcessingVotes = true;
+            
+            // Show spinners on all oracles for 1.5-2 seconds
+            Object.keys(oracles).forEach((oracleId) => {
+                oracles[oracleId].classList.add('processing');
+                spinners[oracleId].classList.remove('hidden');
+            });
+            
+            // After processing, start voting with 1 second intervals
+            setTimeout(() => {
+                isProcessingVotes = false;
+                Object.keys(spinners).forEach(spinnerId => {
+                    spinners[spinnerId].classList.add('hidden');
+                });
+                
+                // Start voting sequence
+                const oracleIds = ['A', 'B', 'C'];
+                oracleIds.forEach((oracleId, index) => {
+                    setTimeout(() => {
+                        simulateVote(oracleId);
+                    }, index * 1000); // 1 second interval
+                });
+            }, 2000); // 2 seconds processing time
+        }
+
+        function simulateVote(oracleId) {
+            if (voteStates[oracleId]) return;
+            
+            voteStates[oracleId] = true;
+            oracles[oracleId].classList.remove('processing');
+            
+            // Animate vote from oracle to router (left to middle)
+            animateFlow(
+                oracles[oracleId],
+                routerContract,
+                'Vote',
+                () => {
+                    oracles[oracleId].classList.add('voted');
+                    voteCounts.current++;
+                    updateVoteCount();
+                    
+                    // If this is the last vote, trigger VoteComplete flow
+                    if (voteCounts.current === 3) {
+                        setTimeout(() => {
+                            sendVoteComplete();
+                        }, 500);
+                    }
+                }
+            );
+        }
+
+        function sendVoteComplete() {
+            routerContract.classList.add('active');
+            
+            // Middle contract sends VoteComplete event to all 3 left oracles
+            const oracleIds = ['A', 'B', 'C'];
+            let completedNotifications = 0;
+            
+            oracleIds.forEach((oracleId, index) => {
+                setTimeout(() => {
+                    animateFlow(
+                        routerContract,
+                        oracles[oracleId],
+                        'VoteComplete',
+                        () => {
+                            completedNotifications++;
+                            
+                            // After all VoteComplete notifications sent, randomly select one to fulfill
+                            if (completedNotifications === 3) {
+                                setTimeout(() => {
+                                    fulfillRequest();
+                                }, 500);
+                            }
+                        }
+                    );
+                }, index * 200);
+            });
+        }
+
+        function fulfillRequest() {
+            // Randomly select one oracle to send the actual response
+            const oracleIds = ['A', 'B', 'C'];
+            const randomOracleId = oracleIds[Math.floor(Math.random() * oracleIds.length)];
+            const fulfillingOracle = oracles[randomOracleId];
+            
+            fulfillingOracle.classList.add('fulfilling');
+            
+            // Animate response from random oracle to router (left to middle)
+            animateFlow(
+                fulfillingOracle,
+                routerContract,
+                'Response',
+                () => {
+                    // Router forwards response to rightest contract (middle to right)
+                    setTimeout(() => {
+                        animateFlow(
+                            routerContract,
+                            callerContract,
+                            'Response',
+                            () => {
+                                callerContract.classList.add('active');
+                            }
+                        );
+                    }, 500);
+                }
+            );
+        }
+
+        function handleVoteSubmitted(data) {
+            // Queue the vote if we're still processing
+            if (isProcessingVotes) {
+                voteQueue.push(data);
+                return;
+            }
+            
+            // If processing is done, handle vote immediately
+            const oracleId = data.oracle_id || getRandomOracle();
+            if (oracleId && oracles[oracleId] && !voteStates[oracleId]) {
+                voteStates[oracleId] = true;
+                oracles[oracleId].classList.remove('processing');
+                spinners[oracleId].classList.add('hidden');
+                
+                animateFlow(
+                    oracles[oracleId],
+                    routerContract,
+                    'Vote',
+                    () => {
+                        oracles[oracleId].classList.add('voted');
+                        voteCounts.current++;
+                        updateVoteCount();
+                    }
+                );
+            }
+        }
+
+        function handleVotingCompleted(data) {
+            voteCounts.total = data.total_votes || 3;
+            voteCounts.current = data.vote_count || voteCounts.current;
+            updateVoteCount();
+            
+            // Mark all oracles as voted if we haven't already
+            Object.keys(oracles).forEach(id => {
+                if (!voteStates[id]) {
+                    oracles[id].classList.add('voted');
+                    voteStates[id] = true;
+                }
+            });
+            
+            // Trigger VoteComplete flow if all votes are in
+            if (voteCounts.current >= voteCounts.total && voteCounts.current === 3) {
+                setTimeout(() => {
+                    sendVoteComplete();
+                }, 500);
+            }
+        }
+
+        function handleRequestFulfilled(data) {
+            setTimeout(() => {
+                routerContract.classList.remove('active');
+                callerContract.classList.remove('active');
+                Object.values(oracles).forEach(oracle => {
+                    oracle.classList.remove('active', 'voted', 'processing', 'fulfilling');
+                });
+                Object.values(spinners).forEach(spinner => {
+                    spinner.classList.add('hidden');
+                });
+                voteCount.classList.remove('visible');
+                activeRequestId = null;
+                isProcessingVotes = false;
+            }, 2000);
+        }
+
+        function animateFlow(from, to, label, onComplete) {
+            const flow = document.createElement('div');
+            flow.className = 'flow-animation';
+            flow.textContent = label;
+            
+            const fromRect = from.getBoundingClientRect();
+            const toRect = to.getBoundingClientRect();
+            
+            const startX = fromRect.left + fromRect.width / 2;
+            const startY = fromRect.top + fromRect.height / 2;
+            const endX = toRect.left + toRect.width / 2;
+            const endY = toRect.top + toRect.height / 2;
+            
+            flow.style.left = startX + 'px';
+            flow.style.top = startY + 'px';
+            
+            document.body.appendChild(flow);
+            
+            requestAnimationFrame(() => {
+                flow.style.transition = 'all 1s ease-in-out';
+                flow.style.left = endX + 'px';
+                flow.style.top = endY + 'px';
+            });
+            
+            setTimeout(() => {
+                flow.remove();
+                if (onComplete) onComplete();
+            }, 1000);
+        }
+
+        function updateVoteCount() {
+            voteCount.textContent = `Votes: ${voteCounts.current}/${voteCounts.total}`;
+            voteCount.classList.add('visible');
+        }
+
+        function getRandomOracle() {
+            const available = ['A', 'B', 'C'].filter(id => !voteStates[id]);
+            if (available.length === 0) return null;
+            return available[Math.floor(Math.random() * available.length)];
+        }
+    </script>
+</body>
+</html>
+

@@ -4,6 +4,7 @@ import { createHash } from "crypto";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { WebSocketServer } from "ws";
 
 const COOLROUTER_PROGRAM_ID = "CATsZNcHms98EcQo1qzGcA3XLPf47NLhQC5g2cRe19Gu";
 const LLM_CONSUMER_PROGRAM_ID = "BrRX5CdLjXZDPzaQFY1BnjdsLeqMED1JeKKSjpnaxU1R";
@@ -122,6 +123,8 @@ class OracleNode {
     this.connection = new Connection(RPC_ENDPOINT, "confirmed");
     this.coolrouterCoder = new BorshCoder(this.coolrouterIdl);
     this.pendingRequests = new Map();
+    this.wsClients = new Set();
+    this.setupWebSocketServer();
 
     this.eventDiscriminators = {
       requestCreated: Buffer.from(this.coolrouterIdl.events.find(e => e.name === "RequestCreated").discriminator),
@@ -137,6 +140,34 @@ class OracleNode {
       responseReceived: this.consumerIdl.types.find(t => t.name === "ResponseReceived").type.fields,
       message: this.coolrouterIdl.types.find(t => t.name === "Message").type.fields,
     };
+  }
+
+  setupWebSocketServer() {
+    this.wss = new WebSocketServer({ port: 7777 });
+    this.wss.on('connection', (ws) => {
+      this.wsClients.add(ws);
+      console.log('Visualization client connected');
+      
+      ws.on('close', () => {
+        this.wsClients.delete(ws);
+        console.log('Visualization client disconnected');
+      });
+      
+      ws.on('error', (error) => {
+        console.error('WebSocket error:', error);
+      });
+    });
+    
+    console.log('WebSocket server started on ws://localhost:7777');
+  }
+
+  broadcast(data) {
+    const message = JSON.stringify(data);
+    this.wsClients.forEach((client) => {
+      if (client.readyState === 1) { // WebSocket.OPEN
+        client.send(message);
+      }
+    });
   }
 
   async start() {
@@ -234,6 +265,16 @@ class OracleNode {
         approval_threshold: event.approval_threshold,
       });
 
+      // Broadcast to visualization
+      this.broadcast({
+        type: 'RequestCreated',
+        request_id: event.request_id,
+        provider: event.provider,
+        model_id: event.model_id,
+        min_votes: event.min_votes,
+        approval_threshold: event.approval_threshold,
+      });
+
       setImmediate(() => this.submitVote(event.request_id, event.messages));
     } catch (e) {
       console.error("Parse error (RequestCreated):", e);
@@ -267,6 +308,14 @@ class OracleNode {
         requestData.vote_count = event.vote_count;
         requestData.total_votes = event.total_votes;
 
+        // Broadcast to visualization
+        this.broadcast({
+          type: 'VotingCompleted',
+          request_id: event.request_id,
+          vote_count: event.vote_count,
+          total_votes: event.total_votes,
+        });
+
         setImmediate(() => this.maybeFulfill(event.request_id, requestData));
       }
     } catch (e) {
@@ -291,6 +340,13 @@ class OracleNode {
       console.log(`\n[RequestFulfilled] ${event.request_id}`);
       console.log(`  Response Length: ${event.response_length} bytes`);
       console.log(`  Slot: ${slot}, Signature: ${signature}`);
+
+      // Broadcast to visualization
+      this.broadcast({
+        type: 'RequestFulfilled',
+        request_id: event.request_id,
+        response_length: event.response_length,
+      });
 
       this.pendingRequests.delete(event.request_id);
     } catch (e) {
@@ -369,9 +425,27 @@ class OracleNode {
 
       await this.connection.confirmTransaction(signature, "confirmed");
       console.log(`[Oracle] Vote submitted: ${signature}`);
+      
+      // Broadcast vote submission to visualization
+      // Use a simple oracle ID based on the keypair (or random for demo)
+      const oracleId = this.getOracleId();
+      this.broadcast({
+        type: 'VoteSubmitted',
+        request_id: requestId,
+        oracle_id: oracleId,
+      });
     } catch (e) {
       console.error(`[Oracle] Failed to submit vote for ${requestId}:`, e.message);
     }
+  }
+
+  getOracleId() {
+    // Generate a consistent oracle ID based on the public key
+    // This ensures the same oracle always gets the same ID
+    const pubkeyStr = this.oracleKeypair.publicKey.toString();
+    const hash = createHash('md5').update(pubkeyStr).digest();
+    const index = hash[0] % 3;
+    return ['A', 'B', 'C'][index];
   }
 
   async maybeFulfill(requestId, requestData) {
