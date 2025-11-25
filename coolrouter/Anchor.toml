@@ -7,8 +7,8 @@ skip-lint = false
 idl-build = ["anchor-lang/idl-build"]
 
 [programs.localnet]
-coolrouter = "DwPxc47Ss4Tyt3q8oT1pu58od2KjB5ZpSihQM3432Dqm"
-llm_consumer = "3YZkQzWFLJcTcLQRJpiUy41pjWzw7cWRhqamswiTfqjN"
+coolrouter = "CATsZNcHms98EcQo1qzGcA3XLPf47NLhQC5g2cRe19Gu"
+llm_consumer = "BrRX5CdLjXZDPzaQFY1BnjdsLeqMED1JeKKSjpnaxU1R"
 
 [registry]
 url = "https://api.apr.dev"
