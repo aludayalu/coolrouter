@@ -45,12 +45,12 @@ describe("coolrouter", () => {
       await consumerProgram.methods
         .requestLlmResponse(requestId, prompt, 1, 100)
         .accounts({
-          consumerState: consumerStatePda,
+          // consumerState: consumerStatePda,
           authority: provider.wallet.publicKey,
           requestPda: requestPda,
           consumerProgram: consumerProgram.programId,
           coolrouterProgram: coolrouterProgram.programId,
-          systemProgram: anchor.web3.SystemProgram.programId,
+          // systemProgram: anchor.web3.SystemProgram.programId,
         })
         .rpc();
       console.log("Request created successfully");
